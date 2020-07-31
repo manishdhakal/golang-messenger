@@ -1,0 +1,4 @@
+500: internal server error
+200: OK
+404: Not found
+409: Conflict
