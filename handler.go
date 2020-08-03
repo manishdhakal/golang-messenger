@@ -276,8 +276,4 @@ func sendMessage(w http.ResponseWriter, r *http.Request) {
 // 	db := dbConn()
 // 	defer db.Close()
 // 	authUserID := getAuthID(sessionID)
-
-
-
-
-}
+// }
