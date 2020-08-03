@@ -2,65 +2,12 @@ package main
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
-
-	_ "github.com/go-sql-driver/mysql"
 )
 
-var jwtKey = []byte("manishjwt")
-
-// UserCredentials for body of request
-type UserCredentials struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-// type Message struct {
-// 	var Body string `json:"body"`
-// }
-
-type Conversation struct {
-	RivalUsername string `json:"rivalUsername"`
-}
-
-func dbConn() (db *sql.DB) {
-	dbDriver := "mysql"
-	// dbUser := "root"
-	// dbPass := "mpass074"
-	// dbURL := "tcp(127.0.0.1:3306)/"
-	// dbName := "messenger"
-	db, err := sql.Open(dbDriver, "root:mpass074@tcp(127.0.0.1:3306)/messenger")
-
-	if err != nil {
-		panic(err.Error())
-	} else {
-		fmt.Println("Successfully connected to mysql")
-	}
-	return db
-}
-
-func main() {
-
-	db := dbConn()
-	db.Close()
-
-	http.HandleFunc("/users", getUsers)
-
-	http.HandleFunc("/logout", logoutHandler)
-	http.HandleFunc("/login", loginHandler)
-	http.HandleFunc("/signup", createUser)
-
-	http.HandleFunc("/create-conv", createConversation)
-	fmt.Println("The server is running in port 8000......")
-	log.Fatal(http.ListenAndServe("localhost:8000", nil))
-}
-
-// the function that returns all users
 func getUsers(w http.ResponseWriter, r *http.Request) {
 
 	db := dbConn()
@@ -86,7 +33,7 @@ func getUsers(w http.ResponseWriter, r *http.Request) {
 // LoginHandler is used for authentication
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 
-	var creds UserCredentials
+	var creds userCredentials
 
 	// Get the JSON body and decode into credentials
 	jsonErr := json.NewDecoder(r.Body).Decode(&creds)
@@ -110,11 +57,11 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var access int
+	var access bool
 	rows.Next()
 	rows.Scan(&access)
 
-	if access == 0 {
+	if !access {
 		w.WriteHeader(http.StatusUnauthorized)
 		fmt.Fprint(w, "Invalid credentials\n")
 		return
@@ -160,84 +107,9 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-// to create conversation
-func createConversation(w http.ResponseWriter, r *http.Request) {
-
-	sessionCookie, sessionErr := r.Cookie("session_id")
-	if sessionErr != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-	sessionID := sessionCookie.Value
-
-	var conv Conversation
-	jsonErr := json.NewDecoder(r.Body).Decode(&conv)
-	if jsonErr != nil {
-		// If the structure of the body is wrong, return an HTTP error
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	db := dbConn()
-	defer db.Close()
-
-	if isAuthorized(sessionID) {
-		var authUserID, rivalUserID int
-
-		qStr := fmt.Sprintf(`SELECT user_id FROM sessions WHERE session_id = "%s"`, sessionID)
-		id, idErr := db.Query(qStr)
-		if idErr != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Print("Cannot retain your auth id\n")
-			return
-		}
-		id.Next()
-		id.Scan(&authUserID)
-
-		qStr = fmt.Sprintf(`SELECT id FROM users WHERE username = "%s"`, conv.RivalUsername)
-		rivalID, rivErr := db.Query(qStr)
-		if rivErr != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Print("Cannot retain rival id\n")
-			return
-		}
-		rivalID.Next()
-		rivalID.Scan(&rivalUserID)
-
-		qStr = fmt.Sprintf(`SELECT EXISTS (
-			 	SELECT * FROM conversations WHERE (user1_id = %d AND user2_id = %d) OR (user1_id = %d AND user2_id = %d)
-			) existence;`, authUserID, rivalUserID, rivalUserID, authUserID)
-		existRow, existErr := db.Query(qStr)
-		if existErr != nil {
-			w.WriteHeader(409)
-			fmt.Print("Error to check the validation of already existing conv\n")
-			return
-		}
-		var exists int
-		existRow.Next()
-		existRow.Scan(&exists)
-
-		if exists == 1 {
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, "The conversation already exists\n")
-			return
-		}
-
-		qStr = fmt.Sprintf(`INSERT INTO conversations (user1_id, user2_id)
-				VALUES (%d, %d)`, authUserID, rivalUserID)
-		_, InsErr := db.Query(qStr)
-		if InsErr != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-	} else {
-		w.WriteHeader(http.StatusUnauthorized)
-	}
-
-}
-
 // to create a user
 func createUser(w http.ResponseWriter, r *http.Request) {
-	var user UserCredentials
+	var user userCredentials
 	// Get the JSON body and decode into credentials
 	jsonErr := json.NewDecoder(r.Body).Decode(&user)
 	if jsonErr != nil {
@@ -258,12 +130,12 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 		fmt.Print(existErr.Error(), "\n")
 		return
 	}
-	var exst int
+	var exst bool
 	exist.Next()
 	exist.Scan(&exst)
 
-	if exst == 1 {
-		w.WriteHeader(409)
+	if exst {
+		w.WriteHeader(http.StatusConflict)
 		fmt.Print("The username already exists\n")
 		return
 	}
@@ -307,26 +179,105 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func isAuthorized(sessionID string) bool {
+func sendMessage(w http.ResponseWriter, r *http.Request) {
+
+	sessionCookie, sessionErr := r.Cookie("session_id")
+	if sessionErr != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	sessionID := sessionCookie.Value
+
+	var msg message
+	// Get the JSON body and decode into credentials
+	jsonErr := json.NewDecoder(r.Body).Decode(&msg)
+	if jsonErr != nil {
+		// If the structure of the body is wrong, return an HTTP error
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	db := dbConn()
 	defer db.Close()
-	qStr := fmt.Sprintf(`SELECT EXISTS (
-		SELECT * FROM sessions WHERE session_id = "%s"
-	) auth;`, sessionID)
-	rows, qErr := db.Query(qStr)
 
-	if qErr != nil {
-		return false
+	authUserID := getAuthID(sessionID)
+	rivalUserID := getUserID(msg.RivalUsername)
+
+	if authUserID == 0 {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if rivalUserID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
-	var access int
-	rows.Next()
-	rows.Scan(&access)
+	qStr := fmt.Sprintf(`SELECT id FROM conversations 
+			WHERE (user1_id = %d AND user2_id = %d) OR (user1_id = %d AND user2_id = %d);`,
+		authUserID, rivalUserID, rivalUserID, authUserID)
+	idRow, idErr := db.Query(qStr)
 
-	if access == 0 {
-		return false
+	if idErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Print("Error to check the validation of already existing conv\n")
+		return
 	}
 
-	return true
+	var convID int
+	if idRow.Next() {
+		idRow.Scan(&convID)
+	} else {
+		qStr = fmt.Sprintf(`INSERT INTO conversations (user1_id, user2_id)
+		VALUES (%d, %d)`, authUserID, rivalUserID)
+		_, insErr := db.Query(qStr)
+		if insErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		fmt.Print("The conversation has been created.\n")
+
+		qStr = fmt.Sprintf(`SELECT id FROM conversations 
+		WHERE (user1_id = %d AND user2_id = %d)`, authUserID, rivalUserID)
+
+		idRow, idErr := db.Query(qStr)
+
+		if idErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Print("Error to check the validation of already existing conv\n")
+			return
+		}
+
+		idRow.Next()
+		idRow.Scan(&convID)
+	}
+
+	qStr = fmt.Sprintf(`INSERT INTO messages (body, conversation_id, sender_id, reciever_id, date_time)
+		VALUES ("%s", %d, %d, %d, "%s");`, msg.Body, convID, authUserID, rivalUserID, time.Now().Format("2006-01-02 15:04:05"))
+
+	_, insERR := db.Query(qStr)
+
+	if insERR != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		println(insERR.Error())
+		return
+	}
+
+	fmt.Println("The message has been added.")
+
+}
+
+// func getAllMyConv(w http.ResponseWriter, r *http.Request) {
+// 	sessionCookie, sessionErr := r.Cookie("session_id")
+// 	if sessionErr != nil {
+// 		w.WriteHeader(http.StatusUnauthorized)
+// 		return
+// 	}
+// 	sessionID := sessionCookie.Value
+
+// 	db := dbConn()
+// 	defer db.Close()
+// 	authUserID := getAuthID(sessionID)
+
+
+
 
 }
