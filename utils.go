@@ -3,17 +3,17 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"net/http"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
 func dbConn() (db *sql.DB) {
 	dbDriver := "mysql"
-	// dbUser := "root"
-	// dbPass := "mpass074"
-	// dbURL := "tcp(127.0.0.1:3306)/"
-	// dbName := "messenger"
-	db, err := sql.Open(dbDriver, "root:mpass074@tcp(127.0.0.1:3306)/messenger")
+	dbUser := "root"
+	dbPass := "password"
+	dbName := "messenger"
+	db, err := sql.Open(dbDriver, dbUser+":"+dbPass+"@/"+dbName)
 
 	if err != nil {
 		panic(err.Error())
@@ -24,7 +24,14 @@ func dbConn() (db *sql.DB) {
 }
 
 // 0 means unauthorized else authorized
-func getAuthID(sessionID string) int {
+
+func getAuthID(w http.ResponseWriter, r *http.Request) int {
+	sessionCookie, sessionErr := r.Cookie("session_id")
+	if sessionErr != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return 0
+	}
+	sessionID := sessionCookie.Value
 	db := dbConn()
 	defer db.Close()
 	qStr := fmt.Sprintf(`SELECT user_id FROM sessions WHERE session_id = "%s";`, sessionID)
@@ -60,4 +67,22 @@ func getUserID(username string) int {
 	}
 	return 0
 
+}
+
+func getUserName(userID int) string {
+	db := dbConn()
+	defer db.Close()
+
+	qStr := fmt.Sprintf(`SELECT username FROM users WHERE id = "%d";`, userID)
+
+	id, idErr := db.Query(qStr)
+	if idErr != nil {
+		return ""
+	}
+	var username string
+	if id.Next() {
+		id.Scan(&username)
+		return username
+	}
+	return ""
 }

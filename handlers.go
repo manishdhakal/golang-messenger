@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -33,7 +34,7 @@ func getUsers(w http.ResponseWriter, r *http.Request) {
 // LoginHandler is used for authentication
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 
-	var creds userCredentials
+	var creds userCreds
 
 	// Get the JSON body and decode into credentials
 	jsonErr := json.NewDecoder(r.Body).Decode(&creds)
@@ -98,18 +99,34 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 
 // LogoutHandler to delete cookies and session
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
-
-	// set cookie to be empty
 	http.SetCookie(w, &http.Cookie{
 		Name:  "session_id",
 		Value: "",
 	})
 
+	sessionCookie, sessionErr := r.Cookie("session_id")
+	if sessionErr != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	sessionID := sessionCookie.Value
+
+	// set cookie to be empty
+	db := dbConn()
+	defer db.Close()
+	qStr := fmt.Sprintf(`DELETE FROM sessions WHERE session_id = "%s";`, sessionID)
+	_, err := db.Query(qStr)
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 }
 
 // to create a user
 func createUser(w http.ResponseWriter, r *http.Request) {
-	var user userCredentials
+	var user userCreds
 	// Get the JSON body and decode into credentials
 	jsonErr := json.NewDecoder(r.Body).Decode(&user)
 	if jsonErr != nil {
@@ -181,14 +198,8 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 
 func sendMessage(w http.ResponseWriter, r *http.Request) {
 
-	sessionCookie, sessionErr := r.Cookie("session_id")
-	if sessionErr != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-	sessionID := sessionCookie.Value
-
-	var msg message
+	authUserID := getAuthID(w, r)
+	var msg messageCreds
 	// Get the JSON body and decode into credentials
 	jsonErr := json.NewDecoder(r.Body).Decode(&msg)
 	if jsonErr != nil {
@@ -197,10 +208,6 @@ func sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db := dbConn()
-	defer db.Close()
-
-	authUserID := getAuthID(sessionID)
 	rivalUserID := getUserID(msg.RivalUsername)
 
 	if authUserID == 0 {
@@ -212,6 +219,8 @@ func sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	db := dbConn()
+	defer db.Close()
 	qStr := fmt.Sprintf(`SELECT id FROM conversations 
 			WHERE (user1_id = %d AND user2_id = %d) OR (user1_id = %d AND user2_id = %d);`,
 		authUserID, rivalUserID, rivalUserID, authUserID)
@@ -265,15 +274,156 @@ func sendMessage(w http.ResponseWriter, r *http.Request) {
 
 }
 
-// func getAllMyConv(w http.ResponseWriter, r *http.Request) {
-// 	sessionCookie, sessionErr := r.Cookie("session_id")
-// 	if sessionErr != nil {
-// 		w.WriteHeader(http.StatusUnauthorized)
-// 		return
-// 	}
-// 	sessionID := sessionCookie.Value
+func getAllMyConv(w http.ResponseWriter, r *http.Request) {
+	authUserID := getAuthID(w, r)
+	if authUserID == 0 {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 
-// 	db := dbConn()
-// 	defer db.Close()
-// 	authUserID := getAuthID(sessionID)
-// }
+	db := dbConn()
+	defer db.Close()
+	qStr := fmt.Sprintf(`SELECT id, user1_id, user2_id FROM conversations 
+		WHERE user1_id = %d OR user2_id = %d;`, authUserID, authUserID)
+	convRows, convErr := db.Query(qStr)
+	if convErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	var convs []conversationDetails
+	var convID, user1ID, user2ID int
+	var rivalUsername string
+
+	for convRows.Next() {
+		convRows.Scan(&convID, &user1ID, &user2ID)
+		var rivalUserID int
+		if user1ID == authUserID {
+			rivalUserID = user2ID
+		} else {
+			rivalUserID = user1ID
+		}
+		rivalUsername = getUserName(rivalUserID)
+		if rivalUsername == "" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		convs = append(convs, conversationDetails{ConvID: convID, RivalUsername: rivalUsername})
+	}
+
+	json.NewEncoder(w).Encode(convs)
+
+}
+
+func getAllMessages(w http.ResponseWriter, r *http.Request) {
+
+	authUserID := getAuthID(w, r)
+	if authUserID == 0 {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	convID, convErr := strconv.Atoi(r.URL.Query().Get("convID"))
+	if convErr != nil {
+		fmt.Println(convErr)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	db := dbConn()
+	defer db.Close()
+
+	qStr := fmt.Sprintf(`SELECT EXISTS (
+			SELECT * FROM conversations WHERE id = %d AND (user1_id = %d OR user2_id = %d)
+		) existence;`, convID, authUserID, authUserID)
+
+	existsRow, existsErr := db.Query(qStr)
+	if existsErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	var exists bool
+	existsRow.Next()
+	existsRow.Scan(&exists)
+
+	if exists == false {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	qStr = fmt.Sprintf(`SELECt body, sender_id, date_time FROM messages 
+		WHERE conversation_id = %d ORDER BY date_time DESC;`, convID)
+	msgRows, msgErr := db.Query(qStr)
+	if msgErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	var (
+		body        string
+		senderID    int
+		dateTime    string
+		messagesRet []messageReturnType
+	)
+
+	for msgRows.Next() {
+		msgRows.Scan(&body, &senderID, &dateTime)
+		var sent bool
+		if senderID == authUserID {
+			sent = true
+		} else {
+			sent = false
+		}
+		messagesRet = append(messagesRet, messageReturnType{Body: body, Sent: sent, DateTime: dateTime})
+	}
+	json.NewEncoder(w).Encode(messagesRet)
+
+}
+
+func changePassword(w http.ResponseWriter, r *http.Request) {
+	authUserID := getAuthID(w, r)
+	if authUserID == 0 {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	var creds changePassCreds
+
+	// Get the JSON body and decode into credentials
+	jsonErr := json.NewDecoder(r.Body).Decode(&creds)
+	fmt.Println(creds, authUserID)
+	if jsonErr != nil {
+		// If the structure of the body is wrong, return an HTTP error
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	db := dbConn()
+	defer db.Close()
+
+	qStr := fmt.Sprintf(`SELECT EXISTS (
+		SELECT * FROM users WHERE id = "%d" AND password_hash = SHA2("%s",256)
+	  ) access`, authUserID, creds.Password)
+
+	existsRow, existsErr := db.Query(qStr)
+
+	if existsErr != nil {
+		fmt.Println(existsErr.Error())
+
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	var exists bool
+	existsRow.Next()
+	existsRow.Scan(&exists)
+	if !exists {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	qStr = fmt.Sprintf(`UPDATE users SET password_hash = sha2("%s", 256) WHERE id = %d;`, creds.NewPassword, authUserID)
+	_, chngErr := db.Query(qStr)
+	if chngErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
