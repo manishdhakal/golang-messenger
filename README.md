@@ -8,3 +8,5 @@ go run .
 ```
 #### DB Design (ERD)
 ![alt erd](https://github.com/manishdhakal/golang-messenger/blob/master/img/erd.jpg)
+
+PS: I used sha256 for encoding the password and the sessions of users
