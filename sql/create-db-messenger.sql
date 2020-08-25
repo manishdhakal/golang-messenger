@@ -1,5 +1,5 @@
-CREATE DATABASE temp_messenger;
-USE temp_messenger;
+CREATE DATABASE messenger;
+USE messenger;
 
 CREATE TABLE users (
 	id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
